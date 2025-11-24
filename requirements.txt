@@ -1,0 +1,5 @@
+Streamlit>=1.28.0
+Pandas>=2.0.0
+Openpyxl>=3.1.0
+Ortools>=9.7.0
+Streamlit-aggrid>=0.3.4
