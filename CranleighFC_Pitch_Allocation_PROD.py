@@ -187,7 +187,7 @@ def load_and_validate_fixtures(filepath: str) -> Tuple[Dict, Dict]:
     fixtures_df['is_cup'] = fixtures_df['prefix'].apply(is_cup_fixture)
     
     # ✅ NEW: Resolve duplicate fixtures (prioritize Cup over League)
-    fixtures_df = resolve_duplicate_fixtures(fixtures_df)
+    fixtures_df, removed_duplicates = resolve_duplicate_fixtures(fixtures_df)
     
     result=fixtures_df.head(10)
     print(result)
@@ -271,72 +271,69 @@ def load_and_validate_fixtures(filepath: str) -> Tuple[Dict, Dict]:
     for date, count in date_counts.items():
         print(f"  {date}: {count} fixtures")
     
-    return fixtures, slots_by_date
+    return fixtures, slots_by_date, removed_duplicates
 
-def resolve_duplicate_fixtures(fixtures_df: pd.DataFrame) -> pd.DataFrame:
+def resolve_duplicate_fixtures(fixtures_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Detect and resolve duplicate fixtures (same team, same date).
     Prioritize Cup matches over League matches.
+    Returns:
+        - fixtures_df: cleaned DataFrame
+        - removed_duplicates: DataFrame of fixtures that were removed
     """
     print(f"\n🔍 Checking for duplicate fixtures (same team, same date)...")
-    
+
     # Find duplicates based on team_name and date
     duplicates = fixtures_df[fixtures_df.duplicated(subset=['team_name', 'date'], keep=False)]
-    
-    if len(duplicates) == 0:
-        print(f"   ✅ No duplicate fixtures found")
-        return fixtures_df
-    
+
+    if duplicates.empty:
+        print("   ✅ No duplicate fixtures found")
+        return fixtures_df, pd.DataFrame(columns=fixtures_df.columns)
+
     print(f"   ⚠️ Found {len(duplicates)} fixture records that are duplicates")
-    
+
     # Group duplicates by team and date
     duplicate_groups = duplicates.groupby(['team_name', 'date'])
-    
-    print(f"\n📋 Duplicate Fixtures Detected:")
+
     fixtures_to_remove = []
-    
+
     for (team, date), group in duplicate_groups:
         print(f"\n   Team: {team}")
         print(f"   Date: {date}")
         print(f"   Conflicts: {len(group)} matches scheduled")
-        
-        # Show all conflicting fixtures
+
+        # Show conflicting fixtures
         for idx, row in group.iterrows():
             fixture_type = "🏆 CUP" if row['is_cup'] else "📋 League"
             prefix_display = f" [{row['prefix']}]" if pd.notna(row['prefix']) and row['prefix'] else ""
             print(f"      {fixture_type}{prefix_display}: {row['away_team']} ({row['league']})")
-        
-        # Prioritization logic
-        cup_matches = group[group['is_cup'] == True]
-        league_matches = group[group['is_cup'] == False]
-        
-        if len(cup_matches) > 0:
-            # Keep Cup match, remove League matches
-            print(f"   ✅ RESOLUTION: Keeping Cup match, removing {len(league_matches)} league match(es)")
-            
-            # Mark league matches for removal
-            for idx in league_matches.index:
-                fixtures_to_remove.append(idx)
-            
-            # If multiple cup matches (rare), keep the first one
+
+        # Prioritize Cup matches
+        cup_matches = group[group['is_cup']]
+        league_matches = group[~group['is_cup']]
+
+        if not cup_matches.empty:
+            # Keep first Cup match, remove others
             if len(cup_matches) > 1:
                 print(f"   ⚠️ Multiple Cup matches found - keeping first Cup match")
-                for idx in cup_matches.index[1:]:
-                    fixtures_to_remove.append(idx)
+                fixtures_to_remove.extend(cup_matches.index[1:])
+            # Remove all league matches
+            fixtures_to_remove.extend(league_matches.index)
+            print(f"   ✅ RESOLUTION: Keeping Cup match, removing {len(league_matches) + max(0, len(cup_matches)-1)} duplicate(s)")
         else:
-            # No cup matches - keep first league match, remove others
+            # No Cup matches - keep first League match
+            fixtures_to_remove.extend(group.index[1:])
             print(f"   ✅ RESOLUTION: Keeping first league match, removing {len(group)-1} duplicate(s)")
-            for idx in group.index[1:]:
-                fixtures_to_remove.append(idx)
-    
+
     # Remove duplicates
-    if fixtures_to_remove:
-        print(f"\n🗑️ Removing {len(fixtures_to_remove)} duplicate fixture(s)")
-        fixtures_df = fixtures_df.drop(fixtures_to_remove)
-        fixtures_df = fixtures_df.reset_index(drop=True)
-        print(f"✅ Remaining fixtures: {len(fixtures_df)}")
-    
-    return fixtures_df
+    removed_duplicates = fixtures_df.loc[fixtures_to_remove]
+    fixtures_df = fixtures_df.drop(fixtures_to_remove).reset_index(drop=True)
+
+    print(f"\n🗑️ Removed {len(removed_duplicates)} duplicate fixture(s)")
+    print(f"✅ Remaining fixtures: {len(fixtures_df)}")
+
+    return fixtures_df, removed_duplicates
+
 # =====================================
 # ⚙️ Build and Solve Model
 # =====================================
@@ -1316,9 +1313,13 @@ def generate_html_schedule(df: pd.DataFrame, fixtures: Dict, output_file: str):
 # =====================================
 if __name__ == '__main__':
     try:
-        fixtures, slots_by_date = load_and_validate_fixtures('cranleigh_home_fixtures.csv')
+        fixtures, slots_by_date, removed_duplicates = load_and_validate_fixtures('cranleigh_home_fixtures.csv')
         result = solve_allocation(fixtures, slots_by_date, timeout=30)
-        
+
+        print("Removed duplicates created:")
+        print(removed_duplicates)
+        print(type(removed_duplicates))
+      
         if result is not None:
             # Export CSV
             output_file = 'pitch_allocations_fixed.csv'
